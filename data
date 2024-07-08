@@ -1,0 +1,256 @@
+To separate your data into training and testing sets in a recommendation system, you typically split your dataset into two parts: one for training the model and one for evaluating its performance. Here’s how you can modify your existing script to include this step:
+
+Step-by-Step Guide to Split Data into Train and Test Sets
+Fetch Purchase History:
+Modify your fetch_purchase_history function to return a DataFrame of purchase history data.
+
+Split the Data:
+Split the fetched purchase history into training and testing sets.
+
+Create User-Item Matrix:
+Create the user-item matrices for both the training and testing datasets.
+
+Train the Model:
+Use the training data to compute item similarities.
+
+Evaluate the Model:
+Use the testing data to evaluate the performance of the recommendation system.
+
+Here’s the modified script including these steps:
+
+python
+Copy code
+import pandas as pd
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy import sparse
+from sklearn.model_selection import train_test_split
+from db_connection import get_session
+from sqlalchemy import text
+import time
+
+
+def run_purchase_rec():
+    total_start_time = time.time()
+    print(f"Total recommendation process started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(total_start_time))}")
+    print("Running recommendation script...")
+
+    # Fetch purchase history as DataFrame
+    purchase_history = fetch_purchase_history()
+
+    # Split the data into training and testing sets
+    train_data, test_data = train_test_split(purchase_history, test_size=0.2, random_state=42)
+    print(f"Train size: {len(train_data)}, Test size: {len(test_data)}")
+
+    # Create the user-item matrix for training data
+    train_counts = train_data.groupby(['user_id', 'book_id']).size().unstack(fill_value=0)
+    sparse_train_counts = sparse.csr_matrix(train_counts)
+    cosine_similarities = cosine_similarity(sparse_train_counts.T)
+    user_id_to_index = {user_id: index for index, user_id in enumerate(train_counts.index)}
+
+    def recommend_items(user_id, n=5):
+        if user_id not in user_id_to_index:
+            return f"User ID {user_id} not found."
+
+        user_index = user_id_to_index[user_id]
+        user_history = sparse_train_counts.getrow(user_index).toarray().flatten()
+        similarities = cosine_similarities.dot(user_history)
+        purchased_indices = np.where(user_history > 0)[0]
+        similarities[purchased_indices] = 0
+        recommended_indices = np.argsort(similarities)[::-1][:n]
+        recommended_items = list(train_counts.columns[recommended_indices])
+        purchased_items = list(train_counts.columns[train_counts.loc[user_id] > 0])
+        recommended_items = [item for item in recommended_items if item not in purchased_items]
+        return recommended_items
+
+    # Fetch book details
+    book_details = fetch_books()
+
+    # Run recommendations for all users in the test set
+    all_user_ids = test_data['user_id'].unique()
+    print_user_ids = [452553, 12449, 13042]
+    recommended_user_count = 0
+
+    start_time = time.time()
+    recommendations_to_insert = []
+
+    for user_id in all_user_ids:
+        recommendations = recommend_items(user_id)
+        recommended_user_count += 1
+
+        # Accumulate recommendations for batch insert
+        recommendations_to_insert.extend([(user_id, book_id) for book_id in recommendations])
+
+        if user_id in print_user_ids:
+            recommended_books = book_details[book_details['book_id'].isin(recommendations)]
+            print(f"Recommendations for user {user_id}: {recommendations}")
+            print(f"Book titles for recommendations for user {user_id}:")
+            print(recommended_books[['book_id', 'title']].to_string(index=False))
+
+    recommendation_end_time = time.time()
+
+    print(f"Recommendation calculation started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
+    print(f"Recommendation calculation ended at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(recommendation_end_time))}")
+    print(f"Total recommendation calculation time: {recommendation_end_time - start_time:.2f} seconds")
+    print(f"Total number of users recommended: {recommended_user_count}")
+
+    # Clear the recommended_books table
+    clear_start_time = time.time()
+    clear_recommended_books()
+    clear_end_time = time.time()
+    print(f"Clear started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(clear_start_time))}")
+    print(f"Clear ended at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(clear_end_time))}")
+    print(f"Total clear time: {clear_end_time - clear_start_time:.2f} seconds")
+
+    # Insert all recommendations in batch
+    insert_start_time = time.time()
+    insert_recommendations_batch(recommendations_to_insert)
+    insert_end_time = time.time()
+    print(f"Insert started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(insert_start_time))}")
+    print(f"Insert ended at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(insert_end_time))}")
+    print(f"Total insert time: {insert_end_time - insert_start_time:.2f} seconds")
+
+    total_end_time = time.time()
+    print(f"Total recommendation process ended at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(total_end_time))}")
+    print(f"Total recommendation process time: {total_end_time - total_start_time:.2f} seconds")
+
+
+# Clear the recommended_books table
+def clear_recommended_books():
+    print("Clearing recommended books")
+    session = get_session("mplus_bp_newsfeed")
+    query = "DELETE FROM recommended_books"
+    session.execute(text(query))
+    session.commit()
+    session.close()
+
+
+# Fetch purchase history
+def fetch_purchase_history():
+    print("Fetching purchase history")
+    session = get_session("mplus_bp_server")
+    query = """
+SELECT DISTINCT u.user_id, b.id AS book_id
+FROM unlocks u
+JOIN books b ON (u.model_type = 'audio_book' AND u.model_id = b.audio_book_id)
+             OR (u.model_type = 'ebook' AND u.model_id = b.ebook_id)
+WHERE u.model_type IN ('audio_book', 'ebook')
+AND u.user_id IN (
+    SELECT user_id
+    FROM unlocks
+    WHERE model_type IN ('audio_book', 'ebook')
+    GROUP BY user_id
+    HAVING COUNT(DISTINCT model_id) >= 2
+)
+ORDER BY u.user_id
+LIMIT 500000;
+    """
+
+    start_time = time.time()
+    result = session.execute(text(query))
+    end_time = time.time()
+
+    fetch_time = end_time - start_time
+    print(f"Fetch time: {fetch_time:.2f} seconds")
+
+    result_list = result.fetchall()
+    df = pd.DataFrame(result_list, columns=['user_id', 'book_id'])
+    print(f"size: {len(df)}")
+
+    session.close()
+    return df
+
+
+# Fetch book details
+def fetch_books():
+    print("Fetching books...")
+    session = get_session("mplus_bp_server")
+    query = "SELECT id AS book_id, title FROM books;"
+
+    start_time = time.time()
+    result = session.execute(text(query))
+    end_time = time.time()
+
+    fetch_time = end_time - start_time
+    print(f"Fetch time: {fetch_time:.2f} seconds")
+
+    result_list = result.fetchall()
+    df = pd.DataFrame(result_list, columns=['book_id', 'title'])
+    print(f"size: {len(df)}")
+
+    session.close()
+    return df
+
+
+# Insert recommendations into the recommended_books table in batch
+def insert_recommendations_batch(recommendations):
+    session = get_session("mplus_bp_newsfeed")
+    query = text("INSERT INTO recommended_books (user_id, book_id) VALUES (:user_id, :book_id)")
+    session.execute(query, [{'user_id': user_id, 'book_id': book_id} for user_id, book_id in recommendations])
+    session.commit()
+    session.close()
+
+
+# Example usage
+# run_purchase_rec()
+# fetch_books()
+Key Changes:
+Data Splitting: The fetch_purchase_history function fetches the full dataset, and then the train_test_split function from sklearn.model_selection is used to split the data into training and testing sets.
+Model Training: The user-item matrix is created only for the training data, and item similarities are computed based on this matrix.
+Evaluation: Recommendations are generated for users in the test set, and performance can be evaluated based on the recommendations made.
+You can further extend this to include specific metrics for evaluating the performance of your recommendations, such as precision, recall, and F1 score, by comparing the recommended items with the actual items in the test set.
+
+
+
+
+
+
+so what is train and test data separation usage for?
+ChatGPT
+Train and test data separation is a fundamental practice in machine learning and recommender systems for several key reasons:
+
+1. Model Training:
+Training Data: This subset of the data is used to train the model. The model learns patterns, similarities, and relationships from this data to make predictions or recommendations.
+Learning Parameters: During training, the model tunes its parameters to minimize the error or maximize the accuracy of predictions based on the training data.
+2. Model Evaluation:
+Testing Data: This subset is kept separate from the training data and is used to evaluate the model's performance. It simulates how the model will perform on unseen data, providing an estimate of its real-world effectiveness.
+Unbiased Performance Metrics: Using a separate test set helps ensure that the evaluation metrics (such as accuracy, precision, recall, etc.) are unbiased and not overly optimistic.
+3. Preventing Overfitting:
+Overfitting: This occurs when a model learns the training data too well, capturing noise and details that do not generalize to new data. The model performs well on the training data but poorly on unseen data.
+Generalization: By testing on unseen data, we can assess whether the model generalizes well and avoid overfitting. If the model performs well on both training and test data, it indicates good generalization.
+4. Hyperparameter Tuning:
+Validation Set: Sometimes, the data is split into three sets: training, validation, and testing. The validation set is used to tune hyperparameters and make model selection decisions without peeking into the test set.
+Improved Model Selection: This helps in selecting the best model and tuning parameters for optimal performance on unseen data.
+Practical Example in Your Context:
+In the context of your recommendation system, separating the data into training and test sets allows you to:
+
+Train the Recommendation Model: Use the training set to build the user-item matrix and compute item similarities.
+Generate Recommendations: Use the trained model to generate recommendations for users in the test set.
+Evaluate Recommendations: Compare the recommendations against the actual purchases in the test set to assess the model’s performance. Metrics such as precision, recall, and F1 score can be calculated to determine how well the model is performing.
+Iterate and Improve: Use the insights from the evaluation to refine your model. This may involve trying different algorithms, adjusting parameters, or incorporating additional data.
+Code Example Recap:
+In the provided code example, the data is split into training and test sets using train_test_split. The model is trained using the training data, and recommendations are generated for users in the test data. This process allows you to objectively evaluate how well your recommendation system is likely to perform in a real-world scenario.
+
+python
+Copy code
+# Split the data into training and testing sets
+train_data, test_data = train_test_split(purchase_history, test_size=0.2, random_state=42)
+print(f"Train size: {len(train_data)}, Test size: {len(test_data)}")
+
+# Create the user-item matrix for training data
+train_counts = train_data.groupby(['user_id', 'book_id']).size().unstack(fill_value=0)
+sparse_train_counts = sparse.csr_matrix(train_counts)
+cosine_similarities = cosine_similarity(sparse_train_counts.T)
+user_id_to_index = {user_id: index for index, user_id in enumerate(train_counts.index)}
+
+# Generate recommendations and evaluate for the test set
+Conclusion:
+Separating data into training and testing sets is crucial for building robust and reliable recommendation systems. It ensures that the model you develop is evaluated fairly and can generalize well to new, unseen data, thereby providing meaningful and accurate recommendations to users.
+
+
+
+
+
+
+
+
