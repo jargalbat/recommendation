@@ -1,0 +1,7 @@
+print(f'Average Precision@{TOP_N}: {avg_precision_at_k:.4f} (Goal: 0.10 to 0.30)')
+print(f'Average Recall@{TOP_N}: {avg_recall_at_k:.4f} (Goal: 0.20 to 0.50)')
+print(f'Average F1 Score@{TOP_N}: {avg_f1_score:.4f} (Goal: 0.15 to 0.35)')
+print(f'Diversity: {diversity:.4f} (Goal: At least 10-20% diverse recommendations)')
+print(f'Hit Rate: {hit_rate:.4f} (Goal: At least 0.5)')
+print(f'Novelty: {novelty:.4f} (Goal: 0.01 to 0.05)')
+print(f'R-Precision Mean Error (RME): {rme:.4f} (Goal: Closer to 1.0 or below)')
